@@ -1,0 +1,78 @@
+# llama.cpp router mode on gfx906 (MI50 16 GB): Gemma 4 12B chat + BGE-M3 embed,
+# BOTH resident on the one card at once.
+#
+# Why llama.cpp router mode:
+#   - gemma4 *and* router/model-management are recent llama.cpp features; the
+#     mixa3607 gfx906 image is a daily build (b9623, 2026-06-13) so it has both.
+#   - One process serves many models, loads/unloads on demand, isolates each in a
+#     child process. We pin --models-max 2 so the two we want never evict.
+#
+# Engine: mixa3607/llama.cpp-gfx906 — gfx906 community fork, ROCm 7.2.3 build. If
+#   the MI50 misbehaves on ROCm 7.2 (gfx906 is officially dropped there), swap the
+#   tag to the same build on 6.3.3: mixa3607/llama.cpp-gfx906:b9623-rocm-6.3.3
+#   (same llama.cpp, older ROCm).
+#
+# Models (auto-downloaded on first boot into ./models/.hf via -hf):
+#   chat : ggml-org/gemma-4-12B-it-GGUF:Q4_K_M   (~7.4 GB, f16 KV)
+#   embed: gpustack/bge-m3-GGUF:FP16             (~1.2 GB, fp16 = ~17% faster
+#                                                 than q8 on this compute-weak card)
+# See ./models.ini for per-model flags and the VRAM budget.
+#
+# Usage (one model server per GPU):
+#   docker compose -f docker-compose.llamacpp-rocm7.yml up      # watch first-boot logs
+#
+# Test:
+#   curl -s localhost:8000/v1/models | jq
+#   curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
+#     "model":"gemma-4-12b",
+#     "messages":[{"role":"user","content":"One sentence: what is a KV cache?"}]}'
+#   curl -s localhost:8000/v1/embeddings -H 'content-type: application/json' -d '{
+#     "model":"bge-m3","input":["xin chào"]}' | jq '.data[0].embedding | length'   # -> 1024
+services:
+
+  llamacpp:
+    image: docker.io/mixa3607/llama.cpp-gfx906:b9623-rocm-7.2.3
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - keep-groups
+    security_opt:
+      - label=disable
+    ipc: host
+    environment:
+      # gfx906 is native 9.0.6; override is harmless and matches mixa's docs.
+      HSA_OVERRIDE_GFX_VERSION: "9.0.6"
+      # llama.cpp's -hf download cache + HF cache both point at the mounted dir so
+      # models persist across recreates (shared HF cache dir).
+      LLAMA_CACHE: /hf
+      HF_HOME: /hf
+    volumes:
+      - ./models/.hf:/hf:Z
+      - ./llamacpp/models.ini:/models.ini:Z,ro
+    ports:
+      - "0.0.0.0:8000:8000"
+    # Router mode: no -m/-hf on the command line; the preset file defines the
+    # models. --models-max 2 keeps both loaded at once. The binary lives in /app
+    # and isn't on PATH (image's own entrypoint is /app/tools.sh), so call it by
+    # full path and override the entrypoint.
+    entrypoint: ["/app/llama-server"]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --models-preset
+      - /models.ini
+      - --models-max
+      - "2"
+      - --jinja
+      - --metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      # First boot downloads ~8 GB of GGUF; give it room.
+      start_period: 600s

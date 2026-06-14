@@ -1,0 +1,48 @@
+# llama.cpp on gfx906 (MI50) — ROCm 6.3.3 build, for the 6.3.3-vs-7.2.3 A/B.
+#
+# Identical to docker-compose.llamacpp-rocm7.yml except the image's ROCm version.
+# gfx906 is officially dropped in ROCm 7.x (mixa patches it back); 6.3.3 is the
+# last with official-ish gfx906 support, so rocBLAS Tensile kernel perf can differ.
+# Same b9623 llama.cpp build, same models.ini -> clean backend A/B.
+#
+# Run THIS or another llama.cpp/vLLM compose, not several (one GPU). Port 8000.
+services:
+
+  llamacpp:
+    image: docker.io/mixa3607/llama.cpp-gfx906:b9623-rocm-6.3.3
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - keep-groups
+    security_opt:
+      - label=disable
+    ipc: host
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "9.0.6"
+      LLAMA_CACHE: /hf
+      HF_HOME: /hf
+    volumes:
+      - ./models/.hf:/hf:Z
+      - ./llamacpp/models.ini:/models.ini:Z,ro
+    ports:
+      - "0.0.0.0:8000:8000"
+    entrypoint: ["/app/llama-server"]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --models-preset
+      - /models.ini
+      - --models-max
+      - "2"
+      - --jinja
+      - --metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 600s
