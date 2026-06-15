@@ -65,6 +65,36 @@ line_chart(PREFILL_TOTAL, "Gemma-4-12B prefill throughput (aggregate)",
 line_chart(EMBED_TOTAL, "BGE-M3 embedding throughput (aggregate)",
            "prompt tokens/sec (all requests)", "embed-total.svg")
 
+# --- MTP (speculative draft-mtp, n-max 3) vs baseline, ROCm 7.2.3 decode ---
+# draft acceptance ~0.66. Same target Q4_K_M + f16 KV.
+MTP_ST = {
+    "baseline (no MTP)": dict(color="#8b949e", marker="o", ls="--", lw=1.6),
+    "MTP (draft-mtp, n=3)": dict(color="#cf222e", marker="D", ls="-", lw=2),
+}
+MTP_DEC_REQ = {
+    "baseline (no MTP)":    DECODE_REQ["ROCm 7.2.3"],
+    "MTP (draft-mtp, n=3)": [51.6, 29.8, 31.1, 19.4, 15.3, 11.0, 7.6, 5.2],
+}
+MTP_DEC_TOT = {
+    "baseline (no MTP)":    DECODE_TOTAL["ROCm 7.2.3"],
+    "MTP (draft-mtp, n=3)": [45.5, 52.7, 99.1, 98.1, 101.5, 136.4, 181.2, 180.6],
+}
+def mtp_chart(data, title, ylabel, fname):
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    for name, ys in data.items():
+        ax.plot(CONC, ys, label=name, markersize=5, **MTP_ST[name])
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(CONC); ax.set_xticklabels([str(c) for c in CONC])
+    ax.set_xlabel("concurrent requests"); ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=11, fontweight="bold"); ax.set_ylim(bottom=0)
+    ax.grid(True, which="both", alpha=0.25); ax.legend(frameon=False, fontsize=9)
+    fig.tight_layout(); fig.savefig(os.path.join(OUT, fname)); plt.close(fig)
+    print("wrote", fname)
+mtp_chart(MTP_DEC_REQ, "MTP vs baseline — decode per request (ROCm 7.2.3)",
+          "tokens/sec per request", "mtp-decode-perreq.svg")
+mtp_chart(MTP_DEC_TOT, "MTP vs baseline — decode aggregate (ROCm 7.2.3)",
+          "tokens/sec (all requests)", "mtp-decode-total.svg")
+
 # --- KV cache dtype demo (ROCm 7.2.3, conc=4) ---
 KV = ["f16", "q8_0", "q4_0"]
 KV_TGREQ = [18.45, 17.95, 16.88]

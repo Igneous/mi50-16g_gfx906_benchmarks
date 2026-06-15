@@ -18,7 +18,11 @@ comparing three backends and the KV-cache dtype tradeoff.
 - **f16 KV cache is the right default on this card.** It decodes fastest (no
   per-step dequant on a compute-weak GPU) and VRAM allows it. q8/q4 only buy VRAM,
   at a decode cost.
-- **Decision: ROCm 7.2.3 + f16 KV.** A low-concurrency RAG chat+embed workload is
+- **MTP (speculative decode) gives ~1.5× decode in the C=4–8 range** (~0.66 draft
+  acceptance) — real and useful, but not the ~3× datacenter GPUs see, because
+  gfx906 is compute-weak on the parallel-verify step. Lossless; +0.9 GB VRAM.
+- **Decision: ROCm 7.2.3 + f16 KV** (and MTP if you want faster decode at the
+  recommended low concurrency). A low-concurrency RAG chat+embed workload is
   dominated by embedding + prefill, where ROCm wins.
 
 ## Setup
@@ -118,6 +122,43 @@ is noisy and crosses — no clean winner.
 
 ---
 
+## MTP — multi-token (speculative) decode
+
+Gemma 4 ships a Multi-Token Prediction drafter; llama.cpp merged MTP on 2026-06-07,
+so b9623 supports it (`--spec-type draft-mtp --spec-draft-n-max 3`). It's lossless
+(the target verifies the drafted tokens). Setup: same target `Q4_K_M` + f16 KV, with
+the `unsloth gemma-4-12b-it-F16-MTP.gguf` drafter (~0.86 GB). **Draft acceptance ~0.66.**
+This *only* touches decode — prefill is unchanged (~490 tok/s, confirmed).
+
+![MTP vs baseline decode per request](mtp-decode-perreq.svg)
+
+Decode, ROCm 7.2.3, gemma-4-12B, per-request tok/s (baseline = no MTP):
+
+| conc | baseline | MTP | speedup |
+|--:|--:|--:|--:|
+| 1  | 47.1 | 51.6 | 1.10× |
+| 2  | 31.5 | 29.8 | 0.95× |
+| 4  | 18.5 | 31.1 | **1.68×** |
+| 6  | 12.5 | 19.4 | **1.55×** |
+| 8  | 9.96 | 15.3 | **1.53×** |
+| 16 | 11.6 | 11.0 | 0.95× |
+| 32 | 5.8  | 7.6  | 1.31× |
+| 48 | 4.8  | 5.2  | 1.08× |
+
+**A real ~1.5× decode win in the interactive C=4–8 range** (exactly the recommended
+operating point), modest at C=1, fading as concurrency saturates the GPU (MTP's
+parallel-verify then just competes with the batch). **Not** the ~3× datacenter GPUs
+see (52→162 on a B200): gfx906 is *compute*-weak, so the verify step is relatively
+expensive here — the same property that makes ROCm beat Vulkan on prefill. Costs
+~0.9 GB VRAM for the drafter (14.8/16 GB at parallel 48). Decode/baseline numbers are
+noisy (see above), so read the C=4–8 band as the headline, not every point.
+
+> Caveat: the MTP run had gemma's "thinking" on (the `--chat-template-kwargs` CLI
+> flag didn't apply); decode tok/s is unaffected by content type, but acceptance
+> reflects thinking-mode generation. Config: `docker-compose.llamacpp-mtp.yml`.
+
+---
+
 ## KV cache dtype — the f16 "free win"
 
 gemma weights are Q4, so quantizing the KV cache *seems* natural. It isn't, here.
@@ -149,8 +190,9 @@ embedding default — an earlier A/B measured FP16 ~15–19% faster than Q8 on t
 2. **f16 everywhere it counts** (KV cache + embedding weights). Counterintuitive
    vs "quantize all the things," but correct on a compute-weak GPU with VRAM to spare.
 3. **Low concurrency for interactive chat.** Decode doesn't amortize well; `parallel≈4`
-   is the UX sweet spot (~18 tok/s/user). High concurrency only helps bulk/offline.
-4. **Vulkan is the move only for a high-concurrency batched-decode workload** — the
+   is the UX sweet spot (~18 tok/s/user, ~30 with MTP). High concurrency only helps bulk/offline.
+4. **Turn MTP on for interactive decode.** Lossless ~1.5× in the C=4–8 band for +0.9 GB.
+5. **Vulkan is the move only for a high-concurrency batched-decode workload** — the
    one regime where it's competitive — and it's higher-maintenance (rebuild the
    release-wrapper image per bump vs `docker pull` a tag).
 
@@ -162,8 +204,10 @@ podman compose -f docker-compose.llamacpp-rocm7.yml up -d     # ROCm 7.2.3
 podman compose -f docker-compose.llamacpp-rocm6.yml up -d     # ROCm 6.3.3
 podman build --build-arg LLAMA_BUILD=b9623 -t localhost/llamacpp-vulkan-b9623 llamacpp-vulkan/
 podman compose -f docker-compose.llamacpp-vulkan.yml up -d    # Vulkan
+podman compose -f docker-compose.llamacpp-mtp.yml up -d       # ROCm7 + MTP (needs the
+                                                              # unsloth F16-MTP drafter in ./models)
 
-# bench (needs parallel>=N in llamacpp/models.ini to exercise concurrency N):
+# bench (needs parallel>=N in models.ini to exercise concurrency N):
 python3 bench_llamacpp.py 1,2,4,6,8,16,32,48 gemma
 python3 bench_llamacpp.py 1,2,4,6,8,16,32,48 embed
 

@@ -1,0 +1,64 @@
+# llama.cpp + MTP (multi-token / speculative decode) on gfx906 — benchmark rig.
+#
+# Standalone gemma-4-12B (no bge) with the Gemma-4 MTP drafter as the speculative
+# draft model. Same b9623 ROCm 7.2.3 image + same target GGUF + f16 KV as the main
+# benchmark, so MTP-on vs MTP-off decode is a clean A/B.
+#   target : ggml-org/gemma-4-12B-it-GGUF:Q4_K_M  (already cached)
+#   drafter: unsloth gemma-4-12b-it-F16-MTP.gguf  (~0.86 GB, mounted from ./models)
+# Flags: --spec-type draft-mtp --spec-draft-n-max 3.
+services:
+
+  llamacpp:
+    image: docker.io/mixa3607/llama.cpp-gfx906:b9623-rocm-7.2.3
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - keep-groups
+    security_opt:
+      - label=disable
+    ipc: host
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "9.0.6"
+      LLAMA_CACHE: /hf
+      HF_HOME: /hf
+    volumes:
+      - ./models/.hf:/hf:Z
+      - ./models/mtp-gemma-4-12b-it-F16.gguf:/mtp.gguf:Z,ro
+    ports:
+      - "0.0.0.0:8000:8000"
+    entrypoint: ["/app/llama-server"]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --alias
+      - gemma-4-12b
+      - -hf
+      - ggml-org/gemma-4-12B-it-GGUF:Q4_K_M
+      - --spec-draft-model
+      - /mtp.gguf
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "3"
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "48"
+      - --cache-type-k
+      - f16
+      - --cache-type-v
+      - f16
+      - --flash-attn
+      - auto
+      - --jinja
+      - --metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
